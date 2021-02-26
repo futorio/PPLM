@@ -3,6 +3,7 @@
 
 # This code is licensed under a non-commercial license.
 
+import logging
 import argparse
 import csv
 import json
@@ -22,13 +23,15 @@ from tqdm import tqdm, trange
 from transformers import BertTokenizer, BertModel
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 
-from pplm_classification_head import ClassificationHead
+from pplm_classification_head import ClassificationHead, NoLinClassificationHead
 
 torch.manual_seed(0)
 np.random.seed(0)
 EPSILON = 1e-10
-example_sentence = "This is incredible! I love it, this is the best chicken I have ever had."
+example_sentence = "Учёные выяснили, что убийство инопланетян не ведёт к укреплению отношений между Ираном и Египтом"
 max_length_seq = 100
+
+logger = logging.getLogger(__name__)
 
 
 class Discriminator(torch.nn.Module):
@@ -43,14 +46,10 @@ class Discriminator(torch.nn.Module):
             device='cpu'
     ):
         super(Discriminator, self).__init__()
-        if pretrained_model.startswith("gpt2"):
+        if not pretrained_model.startswith("bert"):
             self.tokenizer = GPT2Tokenizer.from_pretrained(pretrained_model)
             self.encoder = GPT2LMHeadModel.from_pretrained(pretrained_model)
             self.embed_size = self.encoder.transformer.config.hidden_size
-        elif pretrained_model.startswith("bert"):
-            self.tokenizer = BertTokenizer.from_pretrained(pretrained_model)
-            self.encoder = BertModel.from_pretrained(pretrained_model)
-            self.embed_size = self.encoder.config.hidden_size
         else:
             raise ValueError(
                 "{} model not yet supported".format(pretrained_model)
@@ -60,7 +59,7 @@ class Discriminator(torch.nn.Module):
         else:
             if not class_size:
                 raise ValueError("must specify class_size")
-            self.classifier_head = ClassificationHead(
+            self.classifier_head = NoLinClassificationHead( #ClassificationHead(
                 class_size=class_size,
                 embed_size=self.embed_size
             )
@@ -270,7 +269,7 @@ def get_idx2class(dataset_fp):
     return sorted(classes)
 
 
-def get_generic_dataset(dataset_fp, tokenizer, device,
+def get_generic_dataset(dataset_fp, tokenizer, device, max_length_seq,
                         idx2class=None, add_eos_token=False):
     if not idx2class:
         idx2class = get_idx2class(dataset_fp)
@@ -286,7 +285,16 @@ def get_generic_dataset(dataset_fp, tokenizer, device,
                 text = row[1]
 
                 try:
-                    seq = tokenizer.encode(text)
+                    seq = tokenizer.encode(text, max_length=max_length_seq, truncation=True)
+                    if add_eos_token:
+                        seq = [50256] + seq
+
+                    seq = torch.tensor(
+                        seq,
+                        device=device,
+                        dtype=torch.long)
+
+                    """
                     if (len(seq) < max_length_seq):
                         if add_eos_token:
                             seq = [50256] + seq
@@ -302,11 +310,13 @@ def get_generic_dataset(dataset_fp, tokenizer, device,
                                 i, max_length_seq
                             ))
                         continue
+                    """
 
                     x.append(seq)
                     y.append(class2idx[label])
 
-                except:
+                except Exception as e:
+                    logger.exception(e)
                     print("Error tokenizing line {}, skipping it".format(i))
                     pass
 
@@ -315,10 +325,12 @@ def get_generic_dataset(dataset_fp, tokenizer, device,
 
 def train_discriminator(
         dataset,
+        dataset_max_seq_len,
         dataset_fp=None,
         pretrained_model="gpt2-medium",
         epochs=10,
         learning_rate=0.0001,
+        weight_decay=.01,
         batch_size=64,
         log_interval=10,
         save_model=False,
@@ -531,7 +543,7 @@ def train_discriminator(
         ).to(device)
 
         full_dataset = get_generic_dataset(
-            dataset_fp, discriminator.tokenizer, device,
+            dataset_fp, discriminator.tokenizer, device, max_length_seq=dataset_max_seq_len,
             idx2class=idx2class, add_eos_token=add_eos_token
         )
         train_size = int(0.9 * len(full_dataset))
@@ -585,7 +597,7 @@ def train_discriminator(
         with open(classifier_head_meta_fp, "w") as meta_file:
             json.dump(discriminator_meta, meta_file)
 
-    optimizer = optim.Adam(discriminator.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(discriminator.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     test_losses = []
     test_accuracies = []
@@ -683,12 +695,17 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_fp", type=str, default="",
                         help="File path of the dataset to use. "
                              "Needed only in case of generic datadset")
+    parser.add_argument("--dataset_max_seq_len", type=int, default=100, help="Max sequence length for text in dataset")
+    
     parser.add_argument("--pretrained_model", type=str, default="gpt2-medium",
                         help="Pretrained model to use as encoder")
     parser.add_argument("--epochs", type=int, default=10, metavar="N",
                         help="Number of training epochs")
+
     parser.add_argument("--learning_rate", type=float, default=0.0001,
                         help="Learnign rate")
+    parser.add_argument("--weight_decay", type=float, default=.01, help="optimizer weight decay (default: 0.01)")
+
     parser.add_argument("--batch_size", type=int, default=64, metavar="N",
                         help="input batch size for training (default: 64)")
     parser.add_argument("--log_interval", type=int, default=10, metavar="N",
