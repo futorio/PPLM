@@ -34,6 +34,12 @@ max_length_seq = 100
 logger = logging.getLogger(__name__)
 
 
+CLASSIFICATION_HEADS = {
+    "linear": ClassificationHead,
+    "nolinear": NoLinClassificationHead,
+}
+
+
 class Discriminator(torch.nn.Module):
     """Transformer encoder followed by a Classification Head"""
 
@@ -42,6 +48,7 @@ class Discriminator(torch.nn.Module):
             class_size=None,
             pretrained_model="gpt2-medium",
             classifier_head=None,
+            classifier_head_type="linear",
             cached_mode=False,
             device='cpu'
     ):
@@ -59,10 +66,10 @@ class Discriminator(torch.nn.Module):
         else:
             if not class_size:
                 raise ValueError("must specify class_size")
-            self.classifier_head = NoLinClassificationHead( #ClassificationHead(
-                class_size=class_size,
-                embed_size=self.embed_size
-            )
+
+            head_cls = CLASSIFICATION_HEADS[classifier_head_type]
+            self.classifier_head = head_cls(class_size=class_size, embed_size=self.embed_size)
+
         self.cached_mode = cached_mode
         self.device = device
 
@@ -328,6 +335,7 @@ def train_discriminator(
         dataset_max_seq_len,
         dataset_fp=None,
         pretrained_model="gpt2-medium",
+        classifier_head_type="linear",
         epochs=10,
         learning_rate=0.0001,
         weight_decay=.01,
@@ -538,6 +546,7 @@ def train_discriminator(
         discriminator = Discriminator(
             class_size=len(idx2class),
             pretrained_model=pretrained_model,
+            classifier_head_type=classifier_head_type,
             cached_mode=cached,
             device=device
         ).to(device)
@@ -705,6 +714,8 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=0.0001,
                         help="Learnign rate")
     parser.add_argument("--weight_decay", type=float, default=.01, help="optimizer weight decay (default: 0.01)")
+
+    parser.add_argument("--classifier_head_type", type=str, default="linear", choices=["linear", "nolinear"])
 
     parser.add_argument("--batch_size", type=int, default=64, metavar="N",
                         help="input batch size for training (default: 64)")
